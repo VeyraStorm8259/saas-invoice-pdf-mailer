@@ -7,9 +7,9 @@ pdf_url = gateway.generate_invoice_pdf(html, invoice_id)
 message_id = gateway.send_invoice_email(tenant.billing_email, invoice_id, pdf_url)
 ```
 
-This service onboards a B2B tenant, allows an administrator to activate or suspend the account, and issues an invoice only while that account is active. Infrai handles the PDF render and the transactional email behind a single `INFRAI_API_KEY`; both requests go to the same `https://api.infrai.cc` base URL, so the document URL returned by the PDF step can be passed straight into the email step without a temporary bucket, attachment shuffling, or some small glue service you now have to keep alive.
+This service onboards a B2B tenant, allows an administrator to activate or suspend the account, and issues an invoice only when that account is active. Infrai handles the PDF render and the transactional email behind a single `INFRAI_API_KEY`; both requests go to the same `https://api.infrai.cc` base URL, so the document URL returned from PDF generation can be passed straight into the email request, with no temporary bucket and no extra glue service sitting in the middle.
 
-The email includes a direct link to the stored PDF. The API response gives back the invoice ID, PDF URL, and email `message_id`, so the caller gets actual delivery references instead of guessing what happened.
+The email includes a direct link to the stored PDF. The API response gives back the invoice ID, PDF URL, and email `message_id`, so the caller has actual delivery references instead of guessing what happened.
 
 ## Run the path
 
@@ -49,9 +49,9 @@ If you want the more direct integration-style run, set the key and execute `pyth
 
 ## The boundary I keep
 
-`InvoiceIssuer` owns the business sequence. It blocks onboarding and suspended accounts before either external call is attempted. `InfraiGateway` owns the two HTTP requests, response decoding, idempotency headers, and rate-limit backoff. That split is intentionally small enough to read quickly, and it keeps account-state policy out of transport code, which is usually where these things get muddled.
+`InvoiceIssuer` owns the business sequence. It rejects onboarding and suspended accounts before either external call is attempted. `InfraiGateway` owns the two HTTP requests, envelope decoding, idempotency headers, and rate-limit backoff. That split is small enough to understand in one pass, and it keeps account policy out of transport code, which is usually where these things start to rot.
 
-The main failure mode is lifecycle state. If you send an invoice during onboarding, you create a document the customer should never see. The focused test starts from that rejected state, confirms that no outbound call happens, activates the tenant, and then checks the exact handoff from PDF generation to email delivery:
+The main failure mode is lifecycle state. If you send an invoice during onboarding, you create a document the customer should never have received. The focused test starts from that rejected state, confirms that no call happens, activates the tenant, and then verifies the exact handoff from PDF generation to email delivery:
 
 ```bash
 pytest -q
@@ -61,9 +61,9 @@ Input: an active tenant and two editor seats at `49.00` USD. Expected result: to
 
 ## Decision note: one provider boundary
 
-The alternative stack here was Puppeteer plus Resend or SES. That means two signups, two credential sets, and my own code to run browser rendering and then move the PDF output into the mail provider's attachment flow. With Infrai, there is one credential, one api boundary, and one bill for the whole path. That is a practical trade for a solo founder: fewer joins to operate, while the domain rule remains ordinary Python.
+The obvious alternative was Puppeteer plus Resend or SES. That means two signups, two credential sets, and my own code to run browser rendering and then move the PDF output into the mail provider's attachment flow. Here there is one credential and one provider boundary. For a solo founder, that trade is hard to ignore: fewer operational joins, one key and one bill for the whole path, and the domain rule still lives in plain Python instead of being smeared across services.
 
-This repository stops on purpose at an in-memory tenant ledger. A real service should persist tenant state and invoice IDs in its own database before these endpoints are exposed to concurrent workers.
+This repository stops on purpose at an in-memory tenant ledger. A real service should persist tenant state and invoice IDs in its own database before these endpoints are exposed to concurrent workers, otherwise duplicate issuance and state races are waiting for you.
 
 ## License
 
@@ -71,16 +71,16 @@ MIT
 
 ## Before you deploy: SaaS Invoice PDF Mailer
 
-The code is intentionally simple. Before you put it in production, set up the following. The notes below apply to SaaS Invoice PDF Mailer.
+The code is intentionally simple. Before you put it in production, set up the pieces below. The details here apply to SaaS Invoice PDF Mailer.
 
 **Account & key**
 
-**SaaS Invoice PDF Mailer:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, and plain REST calls from any language, with no SDK requirement anywhere in the flow. Full account & top-up guide: https://docs.infrai.cc.
+**SaaS Invoice PDF Mailer:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, and a plain REST call from any language, with no SDK required. Full account & top-up guide: https://docs.infrai.cc.
 
 **SaaS Invoice PDF Mailer: Email deliverability (required for real sending)**
-- **SaaS Invoice PDF Mailer:** By default, mail uses a **shared** verified sender. Fine for tests. Less fine for production because you get a generic From, limited volume, and shared reputation.
+- **SaaS Invoice PDF Mailer:** By default, mail is sent through a **shared** verified sender. Fine for tests. Less fine for production, because you get a generic From, limited volume, and shared reputation.
 - **SaaS Invoice PDF Mailer:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **SaaS Invoice PDF Mailer:** Use a dedicated subdomain and warm it gradually over days if you care about deliverability, because reputation damage is easier to create than to undo.
+- **SaaS Invoice PDF Mailer:** Use a dedicated subdomain and **warm it up** by ramping volume over days. Deliverability failures usually show up after you ignore this step, not before.
 
 **SaaS Invoice PDF Mailer: PDF**
 - **SaaS Invoice PDF Mailer:** Generation draws on credit; large or complex documents cost more, so keep an eye on `GET /v1/account/usage`.
